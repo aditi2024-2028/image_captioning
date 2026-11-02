@@ -1,0 +1,104 @@
+# ============================================================
+#  E0-R  —  Non-semantic baseline (CLIP ViT-B/16 + BART-base)
+#  Hyperparameters marked TODO must be filled before training.
+# ============================================================
+
+run_name: "e0r"
+seed: 42
+output_dir: "outputs/e0r"
+
+# ----------------------------------------------------------
+# Data
+# ----------------------------------------------------------
+data:
+  train_image_dir: "data/coco/train2017"
+  val_image_dir:   "data/coco/val2017"
+  train_ann_file:  "data/coco/annotations/captions_train2017.json"
+  val_ann_file:    "data/coco/annotations/captions_val2017.json"
+  image_size: 224
+  max_captions_per_image: 5   # up to 5; one sampled per step
+  num_workers: 4
+  pin_memory: true
+
+# ----------------------------------------------------------
+# Model
+# ----------------------------------------------------------
+model:
+  clip_model_name: "openai/clip-vit-base-patch16"
+  bart_model_name: "facebook/bart-base"
+  # CLIP hidden dim = 768, BART hidden dim = 768 → projections are 768→768
+  proj_dim: 768
+  # Adapter bottleneck dim (cross-attention adapters in BART decoder)
+  adapter_bottleneck_dim: 64   # TODO: tune (64 is a reasonable starting point)
+
+# ----------------------------------------------------------
+# Training
+# ----------------------------------------------------------
+training:
+  num_epochs: 5
+  batch_size: TODO            # e.g. 32 or 64 — fill before training
+  gradient_accumulation_steps: TODO   # set to simulate larger batch if needed
+  max_grad_norm: 1.0
+  amp: true                   # automatic mixed precision
+
+  optimizer:
+    type: "adamw"
+    lr: TODO                  # e.g. 1e-4 — fill before training
+    weight_decay: TODO        # e.g. 0.01
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+
+  scheduler:
+    type: "cosine_with_warmup"
+    warmup_steps: TODO        # e.g. 500
+    # total steps computed from dataset size at runtime
+
+  # Freeze stages (epoch numbers are 1-indexed)
+  freeze_stages:
+    - epoch_start: 1
+      epoch_end: 2
+      clip_frozen: true
+      bart_trainable_parts: ["cross_attention"]
+      clip_top_vision_layers: 0      # CLIP vision layers unfrozen (0 = none)
+      clip_post_layernorm: false
+    - epoch_start: 3
+      epoch_end: 4
+      clip_frozen: true
+      bart_trainable_parts: ["cross_attention", "top2_decoder_layers"]
+      clip_top_vision_layers: 0
+      clip_post_layernorm: false
+    - epoch_start: 5
+      epoch_end: 5
+      clip_frozen: false             # partial unfreeze below
+      bart_trainable_parts: ["cross_attention", "top2_decoder_layers"]
+      clip_top_vision_layers: 3      # top 3 CLIP vision transformer layers
+      clip_post_layernorm: true
+
+# ----------------------------------------------------------
+# Checkpoint
+# ----------------------------------------------------------
+checkpoint:
+  save_every_epoch: true
+  keep_last_n: 3              # keep last N checkpoints
+  filename_pattern: "ckpt_epoch{epoch:02d}.pt"
+  best_metric: "cider"        # metric to track for "best" tag
+
+# ----------------------------------------------------------
+# Evaluation  (beam search)
+# ----------------------------------------------------------
+eval:
+  batch_size: TODO            # e.g. 64 — fill before eval
+  beam_size: TODO             # e.g. 4
+  max_new_tokens: TODO        # e.g. 30
+  min_length: TODO            # e.g. 5
+  length_penalty: TODO        # e.g. 1.0
+  no_repeat_ngram_size: TODO  # e.g. 3
+  predictions_file: "outputs/e0r/predictions.json"
+
+# ----------------------------------------------------------
+# Kaggle checkpoint sync
+# ----------------------------------------------------------
+kaggle:
+  dataset_owner: TODO         # your Kaggle username
+  dataset_slug: TODO          # e.g. "e0r-checkpoints"
+  local_ckpt_dir: "outputs/e0r"

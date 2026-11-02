@@ -1,0 +1,21 @@
+# Dataset
+Unconfirmed 636316.crdownload
+*.crdownload
+# Model files
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Generated outputs
+outputs/
+logs/
+
+# Environment
+.env
+venv/
+.venv/
