@@ -188,17 +188,53 @@ class Trainer:
 
             if (step + 1) % self.grad_accum == 0:
                 self.scaler.unscale_(self.optimizer)
+
                 nn.utils.clip_grad_norm_(
                     [p for p in self.model.parameters() if p.requires_grad],
                     self.max_grad,
                 )
+
+                old_scale = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                self.lr_scheduler.step()
+                new_scale = self.scaler.get_scale()
+
+                # Advance scheduler only if optimizer update was not skipped
+                if new_scale >= old_scale:
+                    self.lr_scheduler.step()
+
                 self.optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.item() * self.grad_accum
-            n_steps    += 1
+            n_steps += 1
+
+        # Process remaining batches when batch count is not divisible
+        remainder = (step + 1) % self.grad_accum
+
+        if remainder:
+            self.scaler.unscale_(self.optimizer)
+
+            # Correct gradient scaling for the smaller final accumulation
+            correction = self.grad_accum / remainder
+
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    p.grad.mul_(correction)
+
+            nn.utils.clip_grad_norm_(
+                [p for p in self.model.parameters() if p.requires_grad],
+                self.max_grad,
+            )
+
+            old_scale = self.scaler.get_scale()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            new_scale = self.scaler.get_scale()
+
+            if new_scale >= old_scale:
+                self.lr_scheduler.step()
+
+            self.optimizer.zero_grad(set_to_none=True)
 
         return total_loss / max(n_steps, 1)
 
@@ -231,18 +267,47 @@ class Trainer:
 
     def _load_checkpoint(self, path: str) -> None:
         logger.info("Resuming from checkpoint: %s", path)
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
 
+        # Restore trained model weights
         self.model.load_state_dict(ckpt["model_state"])
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
-        self.scaler.load_state_dict(ckpt["scaler"])
+        logger.info("Model weights restored successfully.")
 
-        torch.set_rng_state(ckpt["rng_cpu"])
+        # Restore optimizer and associated states
+        optimizer_restored = False
+
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            optimizer_restored = True
+            logger.info("Optimizer state restored.")
+        except ValueError as e:
+            logger.warning("Optimizer incompatible: %s", e)
+            logger.warning("Using a fresh optimizer.")
+
+        if optimizer_restored:
+            try:
+                self.lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
+                self.scaler.load_state_dict(ckpt["scaler"])
+                logger.info("Scheduler and scaler restored.")
+            except (ValueError, KeyError, RuntimeError) as e:
+                logger.warning("Scheduler/scaler restoration failed: %s", e)
+
+        # Restore random states
+        if "rng_cpu" in ckpt:
+            torch.set_rng_state(torch.as_tensor(ckpt["rng_cpu"], dtype=torch.uint8, device="cpu"))
+
         if ckpt.get("rng_cuda") and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
-        np.random.set_state(ckpt["rng_numpy"])
-        random.setstate(ckpt["rng_python"])
+            cuda_states = [
+                torch.as_tensor(state, dtype=torch.uint8, device="cpu")
+                for state in ckpt["rng_cuda"]
+            ]
+            torch.cuda.set_rng_state_all(cuda_states)
+
+        if "rng_numpy" in ckpt:
+            np.random.set_state(ckpt["rng_numpy"])
+
+        if "rng_python" in ckpt:
+            random.setstate(ckpt["rng_python"])
 
         self.start_epoch = ckpt["epoch"] + 1
         logger.info("Resumed at epoch %d", ckpt["epoch"])

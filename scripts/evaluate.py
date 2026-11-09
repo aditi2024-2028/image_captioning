@@ -25,7 +25,7 @@ from tqdm import tqdm
 from transformers import CLIPProcessor, BartTokenizer
 
 from src.models import E0RCaptioner
-from src.data   import CocoDataset
+from src.data.coco import CocoDataset
 from src.eval   import compute_metrics, compute_chair
 from torch.utils.data import DataLoader
 
@@ -55,7 +55,7 @@ def main() -> None:
     d_cfg  = cfg["data"]
 
     # ── Validate checkpoint epoch ────────────────────────────────────────
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     ckpt_epoch = ckpt.get("epoch", -1)
     if ckpt_epoch != cfg["training"]["num_epochs"]:
         logger.warning(
@@ -83,14 +83,38 @@ def main() -> None:
     processor = CLIPProcessor.from_pretrained(m_cfg["clip_model_name"])
     tokenizer = BartTokenizer.from_pretrained(m_cfg["bart_model_name"])
 
+    # Recreate the exact validation split used during training
+    import csv
+    import random
+
+    image_names = set()
+
+    with open(d_cfg["val_ann_file"], "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+
+        for row in reader:
+            if len(row) >= 2:
+                image_names.add(row[0].split("#")[0].strip())
+
+    image_names = sorted(image_names)
+
+    rng = random.Random(42)
+    rng.shuffle(image_names)
+
+    split_index = int(len(image_names) * 0.8)
+    val_names = image_names[split_index:]
+
+    logger.info("Evaluation validation images: %d", len(val_names))
+
     val_ds = CocoDataset(
         image_dir    = d_cfg["val_image_dir"],
         ann_file     = d_cfg["val_ann_file"],
         processor    = processor,
         tokenizer    = tokenizer,
         max_captions = d_cfg.get("max_captions_per_image", 5),
-        split        = "val",
-        seed         = cfg.get("seed", 42),
+        image_names  = val_names,
+        train        = False,
     )
 
     eval_batch = e_cfg.get("batch_size", 32)
@@ -119,7 +143,7 @@ def main() -> None:
     with torch.no_grad():
         for batch in tqdm(loader, desc="Generating"):
             pixel_values = batch["pixel_values"].to(device, non_blocking=True)
-            image_ids    = batch["image_id"].tolist()
+            image_ids    = batch["image_id"] if isinstance(batch["image_id"], list) else batch["image_id"].tolist()
 
             token_ids = model.generate(pixel_values, **gen_kwargs)  # [B, T]
             captions  = tokenizer.batch_decode(token_ids, skip_special_tokens=True)
@@ -127,18 +151,102 @@ def main() -> None:
             for iid, cap in zip(image_ids, captions):
                 predictions.append({"image_id": iid, "caption": cap})
 
-    # ── Save predictions ─────────────────────────────────────────────────
-    pred_file = e_cfg.get("predictions_file", "outputs/e0r/predictions.json")
+
+    # ── Map Flickr8k filenames to COCO integer IDs ─────────────────
+    import csv
+    import random
+
+    ann_csv = d_cfg["val_ann_file"]
+
+    image_names = set()
+
+    with open(ann_csv, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+
+        for row in reader:
+            if len(row) >= 2:
+                image_names.add(row[0].split("#")[0].strip())
+
+    image_names = sorted(image_names)
+
+    image_id_map = {
+        name: idx for idx, name in enumerate(image_names)
+    }
+
+    # Recreate the exact 80:20 split used during training
+    shuffled_names = image_names.copy()
+    rng = random.Random(42)
+    rng.shuffle(shuffled_names)
+
+    split_index = int(len(shuffled_names) * 0.8)
+    val_names = shuffled_names[split_index:]
+
+    val_ids = {
+        image_id_map[name] for name in val_names
+    }
+
+    logger.info("Validation images: %d", len(val_names))
+
+    # Convert prediction filenames into integer IDs
+    val_name_set = set(val_names)
+
+    predictions = [
+        {
+            "image_id": image_id_map[p["image_id"]],
+            "caption": p["caption"]
+        }
+        for p in predictions
+        if p["image_id"] in image_id_map
+        and p["image_id"] in val_name_set
+    ]
+
+    logger.info("Validation predictions: %d", len(predictions))
+
+    # Create validation-only COCO annotations
+    with open(e_cfg["annotations_file"], "r") as f:
+        coco_data = json.load(f)
+
+    val_coco = {
+        **coco_data,
+        "images": [
+            img for img in coco_data["images"]
+            if img["id"] in val_ids
+        ],
+        "annotations": [
+            ann for ann in coco_data["annotations"]
+            if ann["image_id"] in val_ids
+        ]
+    }
+
+    val_ann_file = os.path.join(
+        os.path.dirname(e_cfg["annotations_file"]),
+        "flickr8k_val_coco.json"
+    )
+
+    with open(val_ann_file, "w") as f:
+        json.dump(val_coco, f)
+
+    # ── Save validation predictions ───────────────────────────────
+    pred_file = e_cfg.get(
+        "predictions_file",
+        "outputs/e0r/predictions.json"
+    )
+
     os.makedirs(os.path.dirname(pred_file), exist_ok=True)
+
     with open(pred_file, "w") as f:
         json.dump(predictions, f, indent=2)
-    logger.info("Saved %d predictions → %s", len(predictions), pred_file)
 
-    # ── Metrics ──────────────────────────────────────────────────────────
-    ann_file = d_cfg["val_ann_file"]
-    metrics  = compute_metrics(predictions, ann_file)
-    chair    = compute_chair(predictions, ann_file)
-    all_m    = {**metrics, **chair}
+    logger.info(
+        "Saved %d validation predictions -> %s",
+        len(predictions), pred_file
+    )
+
+    # ── Calculate metrics ─────────────────────────────────────────
+    metrics = compute_metrics(predictions, val_ann_file)
+    chair = compute_chair(predictions, val_ann_file)
+    all_m = {**metrics, **chair}
 
     logger.info("=" * 60)
     for k, v in all_m.items():

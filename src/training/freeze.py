@@ -139,7 +139,7 @@ class FreezeScheduler:
 
         if clip_top_n > 0:
             # CLIP ViT-B/16 has 12 transformer layers
-            clip_layers = model.clip_vision.vision_model.encoder.layers
+            clip_layers = model.clip_vision.encoder.layers
             n_total     = len(clip_layers)
             for i in range(n_total - clip_top_n, n_total):
                 _set_requires_grad(clip_layers[i], True)

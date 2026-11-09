@@ -1,21 +1,54 @@
-# Dataset
-Unconfirmed 636316.crdownload
+
+# Datasets
+data/
+datasets/
+*.csv
 *.crdownload
-# Model files
-*.pth
+
+# Model checkpoints and weights
 *.pt
+*.pth
 *.ckpt
 *.safetensors
+*.bin
+
+# Generated outputs and evaluation scores
+outputs/
+logs/
+predictions.json
+metrics.json
+flickr8k_coco.json
+flickr8k_val_coco.json
 
 # Python cache
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 
-# Generated outputs
-outputs/
-logs/
-
-# Environment
+# Environments and secrets
 .env
 venv/
 .venv/
+
+# Temporary files
+*.tmp
+*.bak
+
+
+# Temporary backups
+*.before_clip_fix
+*.before_final_fix
+*.scheduler_backup
+
+
+# Ignore nested accidental repository
+image_captioning/
+
+# Ignore all model checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Ignore generated outputs
+outputs/

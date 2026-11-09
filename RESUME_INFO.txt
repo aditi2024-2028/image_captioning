@@ -1,0 +1,9 @@
+
+IMAGE CAPTIONING PROJECT - RESUME INFORMATION
+
+Completed through: Epoch 5
+Latest checkpoint: outputs/e0r/ckpt_epoch05.pt
+Dataset: Flickr8k
+Model: CLIP ViT-B/16 + BART-base
+
+Configured epochs: 5

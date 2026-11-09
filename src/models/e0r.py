@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+import inspect
 import torch
 import torch.nn as nn
 from transformers import CLIPVisionModel, BartForConditionalGeneration, BartConfig
@@ -81,30 +82,56 @@ class _PatchedBartDecoderLayer(nn.Module):
         layer_head_mask=None,
         cross_attn_layer_head_mask=None,
         past_key_value=None,
+        past_key_values=None,
         output_attentions=False,
         use_cache=True,
+        **kwargs,
     ):
-        outputs = self._layer(
-            hidden_states,
-            attention_mask=attention_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
-            layer_head_mask=layer_head_mask,
-            cross_attn_layer_head_mask=cross_attn_layer_head_mask,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
+        params = inspect.signature(self._layer.forward).parameters
+
+        cache = past_key_values if past_key_values is not None else past_key_value
+
+        layer_kwargs = {
+            "attention_mask": attention_mask,
+            "encoder_hidden_states": encoder_hidden_states,
+            "encoder_attention_mask": encoder_attention_mask,
+            "use_cache": use_cache,
+        }
+
+        if "past_key_values" in params:
+            layer_kwargs["past_key_values"] = cache
+        elif "past_key_value" in params:
+            layer_kwargs["past_key_value"] = cache
+
+        if "layer_head_mask" in params:
+            layer_kwargs["layer_head_mask"] = layer_head_mask
+
+        if "cross_attn_layer_head_mask" in params:
+            layer_kwargs["cross_attn_layer_head_mask"] = cross_attn_layer_head_mask
+
+        if "output_attentions" in params:
+            layer_kwargs["output_attentions"] = output_attentions
+
+        accepts_extra = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in params.values()
         )
-        # outputs[0] = hidden_states after the full layer
-        # inject adapter after cross-attention output (before feed-forward
-        # the layer already applied FF internally, so we wrap post-layer)
-        hidden_out = self._adapter(outputs[0])
-        return (hidden_out,) + outputs[1:]
 
+        for key, value in kwargs.items():
+            if key in params or accepts_extra:
+                layer_kwargs[key] = value
 
-# ---------------------------------------------------------------------------
-# E0-R captioner
-# ---------------------------------------------------------------------------
+        outputs = self._layer(hidden_states, **layer_kwargs)
+
+        if isinstance(outputs, torch.Tensor):
+            hidden_out = outputs
+        elif hasattr(outputs, "last_hidden_state"):
+            hidden_out = outputs.last_hidden_state
+        else:
+            hidden_out = outputs[0]
+
+        return self._adapter(hidden_out)
+
 
 class E0RCaptioner(nn.Module):
     """
@@ -130,7 +157,7 @@ class E0RCaptioner(nn.Module):
         # ── CLIP vision backbone ─────────────────────────────────────────
         self.clip_vision = CLIPVisionModel.from_pretrained(clip_model_name)
         clip_hidden = self.clip_vision.config.hidden_size          # 768
-        self.clip_post_layernorm = self.clip_vision.vision_model.post_layernorm
+        self.clip_post_layernorm = self.clip_vision.post_layernorm
 
         # ── Projection heads ────────────────────────────────────────────
         self.patch_proj = nn.Linear(clip_hidden, proj_dim)         # 196 patches

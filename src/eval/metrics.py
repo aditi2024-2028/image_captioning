@@ -212,49 +212,64 @@ def compute_chair(
 # Standard metrics via pycocoevalcap
 # ---------------------------------------------------------------------------
 
+
 def compute_metrics(
     predictions: list[dict],
     annotations_file: str,
 ) -> dict[str, float]:
     """
-    Compute BLEU-1..4, METEOR, ROUGE-L, CIDEr using pycocoevalcap.
-
-    Parameters
-    ----------
-    predictions      : list of {"image_id": int, "caption": str}
-    annotations_file : path to captions_val2017.json
-
-    Returns
-    -------
-    dict with keys: bleu_1, bleu_2, bleu_3, bleu_4, meteor, rouge_l, cider
+    Compute BLEU-1..4, METEOR, ROUGE-L and CIDEr.
+    SPICE is deliberately excluded to avoid CoreNLP downloads.
     """
-    try:
-        from pycocotools.coco import COCO
-        from pycocoevalcap.eval import COCOEvalCap
-    except ImportError as e:
-        raise ImportError(
-            "pycocoevalcap and pycocotools are required for metric computation.\n"
-            "Install with: pip install pycocoevalcap pycocotools"
-        ) from e
+    from pycocoevalcap.bleu.bleu import Bleu
+    from pycocoevalcap.meteor.meteor import Meteor
+    from pycocoevalcap.rouge.rouge import Rouge
+    from pycocoevalcap.cider.cider import Cider
 
-    coco_gt   = COCO(annotations_file)
-    coco_dt   = coco_gt.loadRes(predictions)
-    evaluator = COCOEvalCap(coco_gt, coco_dt)
-    evaluator.params["image_id"] = coco_dt.getImgIds()
-    evaluator.evaluate()
+    with open(annotations_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    raw = {k.lower(): v for k, v in evaluator.eval.items()}
+    # Ground-truth captions grouped by image ID
+    gts = defaultdict(list)
+    for ann in data["annotations"]:
+        gts[ann["image_id"]].append(ann["caption"])
 
-    # pycocoevalcap keys: Bleu_1..4, METEOR, ROUGE_L, CIDEr
-    return {
-        "bleu_1"  : round(raw.get("bleu_1", 0.0) * 100, 4),
-        "bleu_2"  : round(raw.get("bleu_2", 0.0) * 100, 4),
-        "bleu_3"  : round(raw.get("bleu_3", 0.0) * 100, 4),
-        "bleu_4"  : round(raw.get("bleu_4", 0.0) * 100, 4),
-        "meteor"  : round(raw.get("meteor", 0.0)  * 100, 4),
-        "rouge_l" : round(raw.get("rouge_l", 0.0) * 100, 4),
-        "cider"   : round(raw.get("cider",   0.0),       4),
-    }
+    # Predictions grouped by image ID
+    res = defaultdict(list)
+    for pred in predictions:
+        res[pred["image_id"]].append(pred["caption"])
+
+    # Evaluate only images having both references and predictions
+    common_ids = sorted(set(gts.keys()) & set(res.keys()))
+
+    if not common_ids:
+        raise ValueError("No matching image IDs between predictions and annotations.")
+
+    gts = {i: gts[i] for i in common_ids}
+    res = {i: res[i] for i in common_ids}
+
+    print(f"Calculating metrics for {len(common_ids)} images...")
+
+    results = {}
+
+    # BLEU 1-4
+    bleu_scores, _ = Bleu(4).compute_score(gts, res)
+    for i, score in enumerate(bleu_scores, start=1):
+        results[f"bleu_{i}"] = round(score * 100, 4)
+
+    # METEOR
+    meteor_score, _ = Meteor().compute_score(gts, res)
+    results["meteor"] = round(meteor_score * 100, 4)
+
+    # ROUGE-L
+    rouge_score, _ = Rouge().compute_score(gts, res)
+    results["rouge_l"] = round(rouge_score * 100, 4)
+
+    # CIDEr
+    cider_score, _ = Cider().compute_score(gts, res)
+    results["cider"] = round(cider_score, 4)
+
+    return results
 
 
 # ---------------------------------------------------------------------------
