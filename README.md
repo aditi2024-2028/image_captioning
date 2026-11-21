@@ -189,6 +189,17 @@ python scripts/evaluate.py \
 
 Metrics and predictions saved to `outputs/e0r/`.
 
+### Caption an image with the desktop GUI
+
+```bash
+python caption_gui.py
+```
+
+Choose an image and click **Generate caption**. The GUI defaults to
+`outputs/e0r/ckpt_epoch05.pt`; use **Browse...** to select another checkpoint.
+The model is loaded on the first caption request and reused for subsequent
+images. CUDA is used when available; otherwise captioning runs on CPU.
+
 ### 5. Compare against E0-R targets
 
 ```bash
